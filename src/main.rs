@@ -1,12 +1,10 @@
 extern crate chrono;
-extern crate csv;
 extern crate pnet;
 
 mod channel_buffers;
 
 use channel_buffers::{Channel, ChannelBuffers, DeserializationError};
-use chrono::{TimeZone, Utc};
-use csv::Writer;
+use chrono::{DateTime, TimeZone, Utc};
 use pcap::Capture;
 use pnet::packet::{
     ethernet::{EtherTypes, EthernetPacket},
@@ -14,16 +12,20 @@ use pnet::packet::{
     tcp::TcpPacket,
     Packet,
 };
+use rsnano_messages::Message;
+use serde_derive::Serialize;
 use std::{
     env,
-    io::Write,
+    fs::File,
+    io::{BufWriter, Write},
     net::{SocketAddr, SocketAddrV4},
 };
 
 fn main() {
     let pcap_file = get_pcap_file_from_args();
     let mut capture = open_pcap_file(&pcap_file);
-    let mut writer = create_csv_writer("output.csv");
+    let out_file = File::create("output.json").expect("could not create output.json");
+    let mut writer = BufWriter::new(out_file);
     let mut statistics = PacketStatistics::new();
     let mut channels = ChannelBuffers::new();
 
@@ -47,26 +49,19 @@ fn open_pcap_file(filename: &str) -> Capture<pcap::Offline> {
     Capture::from_file(filename).expect("Failed to open pcap file")
 }
 
-fn create_csv_writer(filename: &str) -> Writer<std::fs::File> {
-    let mut writer = csv::Writer::from_path(filename).unwrap();
-    writer
-        .write_record(&[
-            "Frame Number",
-            "Source IP",
-            "Destination IP",
-            "Source Port",
-            "Destination Port",
-            "Timestamp",
-            "Message Content",
-        ])
-        .unwrap();
-    writer
+#[derive(Serialize)]
+pub struct Entry {
+    packet: usize,
+    date: DateTime<Utc>,
+    source: SocketAddr,
+    destination: SocketAddr,
+    message: Message,
 }
 
 fn process_packet(
     packet: &pcap::Packet,
     channels: &mut ChannelBuffers,
-    writer: &mut Writer<std::fs::File>,
+    writer: &mut BufWriter<File>,
     statistics: &mut PacketStatistics,
 ) {
     if statistics.packet_count % 10000 == 0 {
@@ -88,7 +83,7 @@ fn process_ipv4_packet(
     ethernet: &EthernetPacket,
     packet: &pcap::Packet,
     channels: &mut ChannelBuffers,
-    writer: &mut Writer<std::fs::File>,
+    writer: &mut BufWriter<File>,
     statistics: &mut PacketStatistics,
 ) {
     if let Some(ipv4) = Ipv4Packet::new(ethernet.payload()) {
@@ -104,7 +99,7 @@ fn process_tcp_packet(
     tcp: &TcpPacket,
     packet: &pcap::Packet,
     channels: &mut ChannelBuffers,
-    writer: &mut Writer<std::fs::File>,
+    writer: &mut BufWriter<File>,
     statistics: &mut PacketStatistics,
 ) {
     let raw_payload = tcp.payload();
@@ -125,19 +120,20 @@ fn process_tcp_packet(
             }
             Ok(Some(message)) => {
                 statistics.messages_parsed_count += 1;
-                let timestamp = format_timestamp(packet.header.ts.tv_sec, packet.header.ts.tv_usec);
-                // Inline write_packet_data logic here
-                writer
-                    .write_record(&[
-                        statistics.packet_count.to_string(),
-                        channel.source.ip().to_string(),
-                        channel.destination.ip().to_string(),
-                        channel.source.port().to_string(),
-                        channel.destination.port().to_string(),
-                        timestamp.to_string(),
-                        format!("{:?}", message),
-                    ])
-                    .unwrap();
+                let entry = Entry {
+                    packet: statistics.packet_count,
+                    date: Utc
+                        .timestamp_opt(
+                            packet.header.ts.tv_sec,
+                            packet.header.ts.tv_usec as u32 * 1000,
+                        )
+                        .unwrap(),
+                    source: channel.source,
+                    destination: channel.destination,
+                    message,
+                };
+                serde_json::to_writer(&mut *writer, &entry).expect("could not serialize");
+                write!(writer, "\n").unwrap();
             }
             Err(DeserializationError::InvalidHeader) => {
                 statistics.header_deserialization_failed_count += 1
@@ -146,16 +142,6 @@ fn process_tcp_packet(
                 statistics.message_deserialization_failed_count += 1
             }
         }
-    }
-}
-
-fn format_timestamp(ts_sec: i64, ts_usec: i64) -> String {
-    match Utc.timestamp_opt(ts_sec, ts_usec as u32 * 1000) {
-        // Use timestamp_opt
-        chrono::LocalResult::Single(timestamp) => {
-            timestamp.format("%Y-%m-%d %H:%M:%S.%f").to_string()
-        }
-        _ => "Invalid Timestamp".to_string(), // Handle invalid or ambiguous timestamps
     }
 }
 
