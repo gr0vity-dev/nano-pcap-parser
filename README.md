@@ -2,4 +2,5 @@
 
 ## Usage:
 
-`cargo run -- /path/to/file.pcap`
+`cargo run --release -- /path/to/file.pcap`
+

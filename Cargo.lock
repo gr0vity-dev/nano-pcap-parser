@@ -521,6 +521,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "csv",
+ "num-traits",
  "pcap",
  "pnet",
  "rsnano_core",
