@@ -1,6 +1,3 @@
-extern crate chrono;
-extern crate pnet;
-
 mod channel_buffers;
 
 use channel_buffers::{Channel, ChannelBuffers, DeserializationError};
@@ -23,17 +20,42 @@ use std::{
 
 fn main() {
     let pcap_file = get_pcap_file_from_args();
-    let mut capture = open_pcap_file(&pcap_file);
+    let mut capture = Capture::from_file(pcap_file).expect("Failed to open pcap file");
     let out_file = File::create("output.json").expect("could not create output.json");
     let mut writer = BufWriter::new(out_file);
-    let mut statistics = PacketStatistics::new();
-    let mut channels = ChannelBuffers::new();
+    let mut packet_processor = PacketProcessor::new();
 
     while let Ok(packet) = capture.next() {
-        process_packet(&packet, &mut channels, &mut writer, &mut statistics);
+        if packet_processor.statistics.packet_count % 10000 == 0 {
+            print!(".");
+            let _ = std::io::stdout().flush();
+        }
+        packet_processor.statistics.packet_count += 1;
+        if let Some(ethernet) = EthernetPacket::new(packet.data) {
+            match ethernet.get_ethertype() {
+                EtherTypes::Ipv4 => {
+                    if let Some(ipv4) = Ipv4Packet::new(ethernet.payload()) {
+                        if let Some(tcp) = TcpPacket::new(ipv4.payload()) {
+                            let channel = into_channel(&ipv4, &tcp);
+
+                            packet_processor.add_tcp_packet(&channel, tcp.payload());
+
+                            while let Some(entry) =
+                                packet_processor.process_packet(&channel, &packet)
+                            {
+                                serde_json::to_writer(&mut writer, &entry)
+                                    .expect("could not serialize");
+                                write!(writer, "\n").unwrap();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
-    statistics.print_summary();
+    packet_processor.statistics.print_summary();
 }
 
 fn get_pcap_file_from_args() -> String {
@@ -45,8 +67,52 @@ fn get_pcap_file_from_args() -> String {
     args[1].clone()
 }
 
-fn open_pcap_file(filename: &str) -> Capture<pcap::Offline> {
-    Capture::from_file(filename).expect("Failed to open pcap file")
+pub(crate) struct PacketProcessor {
+    statistics: PacketStatistics,
+    channels: ChannelBuffers,
+}
+
+impl PacketProcessor {
+    pub(crate) fn new() -> Self {
+        Self {
+            statistics: PacketStatistics::new(),
+            channels: ChannelBuffers::new(),
+        }
+    }
+
+    pub(crate) fn add_tcp_packet(&mut self, channel: &Channel, payload: &[u8]) {
+        self.statistics.tcp_count += 1;
+        self.channels.add_bytes(&channel, payload);
+    }
+
+    fn process_packet(&mut self, channel: &Channel, packet: &pcap::Packet) -> Option<Entry> {
+        match self.channels.pop_message(channel) {
+            Ok(None) => None,
+            Ok(Some(message)) => {
+                self.statistics.messages_parsed_count += 1;
+                Some(Entry {
+                    packet: self.statistics.packet_count,
+                    date: Utc
+                        .timestamp_opt(
+                            packet.header.ts.tv_sec,
+                            packet.header.ts.tv_usec as u32 * 1000,
+                        )
+                        .unwrap(),
+                    source: channel.source,
+                    destination: channel.destination,
+                    message,
+                })
+            }
+            Err(DeserializationError::InvalidHeader) => {
+                self.statistics.header_deserialization_failed_count += 1;
+                None
+            }
+            Err(DeserializationError::InvalidMessage) => {
+                self.statistics.message_deserialization_failed_count += 1;
+                None
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -58,90 +124,13 @@ pub struct Entry {
     message: Message,
 }
 
-fn process_packet(
-    packet: &pcap::Packet,
-    channels: &mut ChannelBuffers,
-    writer: &mut BufWriter<File>,
-    statistics: &mut PacketStatistics,
-) {
-    if statistics.packet_count % 10000 == 0 {
-        print!(".");
-        let _ = std::io::stdout().flush();
-    }
-    statistics.packet_count += 1;
-    if let Some(ethernet) = EthernetPacket::new(packet.data) {
-        match ethernet.get_ethertype() {
-            EtherTypes::Ipv4 => {
-                process_ipv4_packet(&ethernet, packet, channels, writer, statistics)
-            }
-            _ => {}
-        }
-    }
-}
-
-fn process_ipv4_packet(
-    ethernet: &EthernetPacket,
-    packet: &pcap::Packet,
-    channels: &mut ChannelBuffers,
-    writer: &mut BufWriter<File>,
-    statistics: &mut PacketStatistics,
-) {
-    if let Some(ipv4) = Ipv4Packet::new(ethernet.payload()) {
-        if let Some(tcp) = TcpPacket::new(ipv4.payload()) {
-            statistics.tcp_count += 1;
-            process_tcp_packet(&ipv4, &tcp, packet, channels, writer, statistics);
-        }
-    }
-}
-
-fn process_tcp_packet(
-    ipv4: &Ipv4Packet,
-    tcp: &TcpPacket,
-    packet: &pcap::Packet,
-    channels: &mut ChannelBuffers,
-    writer: &mut BufWriter<File>,
-    statistics: &mut PacketStatistics,
-) {
-    let raw_payload = tcp.payload();
-    let channel = Channel {
+fn into_channel(ipv4: &Ipv4Packet, tcp: &TcpPacket) -> Channel {
+    Channel {
         source: SocketAddr::V4(SocketAddrV4::new(ipv4.get_source(), tcp.get_source())),
         destination: SocketAddr::V4(SocketAddrV4::new(
             ipv4.get_destination(),
             tcp.get_destination(),
         )),
-    };
-
-    channels.add_bytes(&channel, raw_payload);
-
-    loop {
-        match channels.pop_message(&channel) {
-            Ok(None) => {
-                break;
-            }
-            Ok(Some(message)) => {
-                statistics.messages_parsed_count += 1;
-                let entry = Entry {
-                    packet: statistics.packet_count,
-                    date: Utc
-                        .timestamp_opt(
-                            packet.header.ts.tv_sec,
-                            packet.header.ts.tv_usec as u32 * 1000,
-                        )
-                        .unwrap(),
-                    source: channel.source,
-                    destination: channel.destination,
-                    message,
-                };
-                serde_json::to_writer(&mut *writer, &entry).expect("could not serialize");
-                write!(writer, "\n").unwrap();
-            }
-            Err(DeserializationError::InvalidHeader) => {
-                statistics.header_deserialization_failed_count += 1
-            }
-            Err(DeserializationError::InvalidMessage) => {
-                statistics.message_deserialization_failed_count += 1
-            }
-        }
     }
 }
 
