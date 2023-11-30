@@ -116,7 +116,6 @@ fn process_tcp_packet(
         )),
     };
 
-    statistics.messages_parsed_count += 1;
     channels.add_bytes(&channel, raw_payload);
 
     loop {
@@ -125,6 +124,7 @@ fn process_tcp_packet(
                 break;
             }
             Ok(Some(message)) => {
+                statistics.messages_parsed_count += 1;
                 let timestamp = format_timestamp(packet.header.ts.tv_sec, packet.header.ts.tv_usec);
                 // Inline write_packet_data logic here
                 writer
