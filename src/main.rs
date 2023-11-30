@@ -179,6 +179,7 @@ impl PacketStatistics {
     }
 
     fn print_summary(&self) {
+        println!();
         println!("packet_count {}", self.packet_count);
         println!("tcp_count {}", self.tcp_count);
         println!("messages_parsed_count {}", self.messages_parsed_count);

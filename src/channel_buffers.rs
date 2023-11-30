@@ -58,7 +58,7 @@ impl ChannelBuffers {
         let Ok(header) =
             MessageHeader::deserialize_slice(&buffer[..MessageHeader::SERIALIZED_SIZE])
         else {
-            buffer.clear();
+            self.channels.remove(channel);
             return Err(DeserializationError::InvalidHeader);
         };
 
@@ -77,10 +77,7 @@ impl ChannelBuffers {
 
         match message {
             Some(message) => Ok(Some(message)),
-            None => {
-                buffer.clear();
-                Err(DeserializationError::InvalidMessage)
-            }
+            None => Err(DeserializationError::InvalidMessage),
         }
     }
 }
