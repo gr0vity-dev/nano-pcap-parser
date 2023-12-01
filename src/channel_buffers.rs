@@ -78,11 +78,16 @@ impl ChannelBuffers {
             &header,
             0,
         );
-        buffer.drain(..message_len);
 
         match message {
-            Some(message) => Ok(Some(message)),
-            None => Err(DeserializationError::InvalidMessage),
+            Some(message) => {
+                buffer.drain(..message_len);
+                Ok(Some(message))
+            }
+            None => {
+                self.channels.remove(channel);
+                Err(DeserializationError::InvalidMessage)
+            }
         }
     }
 }
