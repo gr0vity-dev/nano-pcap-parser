@@ -26,7 +26,7 @@ impl ChannelBuffers {
         }
     }
 
-    pub fn add_bytes(&mut self, channel: &Channel, bytes: &[u8]) {
+    pub fn add_bytes(&mut self, channel: &Channel, bytes: &[u8]) -> bool {
         let buffer = if let Some(buf) = self.channels.get_mut(channel) {
             Some(buf)
         } else if is_nano_message(bytes) {
@@ -39,6 +39,9 @@ impl ChannelBuffers {
 
         if let Some(buffer) = buffer {
             buffer.extend_from_slice(bytes);
+            true
+        } else {
+            false
         }
     }
 
