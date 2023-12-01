@@ -27,21 +27,23 @@ impl ChannelBuffers {
     }
 
     pub fn add_bytes(&mut self, channel: &Channel, bytes: &[u8]) -> bool {
-        let buffer = if let Some(buf) = self.channels.get_mut(channel) {
-            Some(buf)
+        if let Some(buf) = self.channels.get_mut(channel) {
+            buf.extend_from_slice(bytes);
+            true
         } else if is_nano_message(bytes) {
             let buf = self.channels.entry(channel.clone()).or_default();
             buf.reserve(1024 * 64);
-            Some(buf)
-        } else {
-            None
-        };
-
-        if let Some(buffer) = buffer {
-            buffer.extend_from_slice(bytes);
+            buf.extend_from_slice(bytes);
             true
         } else {
-            false
+            if let Some(sub_slice) = find_nano_message(bytes) {
+                let buf = self.channels.entry(channel.clone()).or_default();
+                buf.reserve(1024 * 64);
+                buf.extend_from_slice(sub_slice);
+                true
+            } else {
+                false
+            }
         }
     }
 
@@ -83,6 +85,20 @@ impl ChannelBuffers {
             None => Err(DeserializationError::InvalidMessage),
         }
     }
+}
+
+fn find_nano_message(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() <= MessageHeader::SERIALIZED_SIZE {
+        return None;
+    }
+
+    for i in 0..bytes.len() - MessageHeader::SERIALIZED_SIZE {
+        if is_nano_message(&bytes[i..]) {
+            return Some(&bytes[i..]);
+        }
+    }
+
+    None
 }
 
 fn is_nano_message(bytes: &[u8]) -> bool {
